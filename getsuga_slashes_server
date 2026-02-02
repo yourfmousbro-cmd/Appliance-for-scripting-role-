@@ -1,0 +1,360 @@
+local replicatedStorage = game.ReplicatedStorage
+local replicatedFirst = game.ReplicatedFirst
+local tweenService = game:GetService("TweenService")
+local debrisService = game:GetService("Debris")
+local abilityRemotes = replicatedStorage.Remotes.Characters["Ichigo (Hollow Mask)"].GetsugaSlash
+local GetsugaSlashCS = abilityRemotes.GetsugaSlashCS
+local GetsugaSlash = abilityRemotes.GetsugaSlash
+local getsugaHITVFX = game.ReplicatedStorage.VFX.Characters["Ichigo (Hollowfication)"].GetsugaSlash.GetsuglaSlashHit.one
+local TP = game.ReplicatedStorage.VFX.Characters["Ichigo (Hollowfication)"].GetsugaSlash.TP
+local verticalCharge = game.ReplicatedStorage.VFX.Characters["Ichigo (Hollowfication)"].GetsugaSlash.SLASHCHARGE.vertical
+local horizontalCharge = game.ReplicatedStorage.VFX.Characters["Ichigo (Hollowfication)"].GetsugaSlash.SLASHCHARGE.horizontal
+
+local MovementController = require(game.ReplicatedStorage.MovementController)
+
+-- Configuration
+local CONFIG = {
+	FIRST_SLASH_DAMAGE = 20,
+	SECOND_SLASH_DAMAGE = 20,
+	SECOND_SLASH_STUN = 1.5,
+	PROJECTILE_SPEED = 50,
+	PROJECTILE_LIFETIME = 3,
+	SLASH_DELAY = 0.8,
+	SLOWDOWN_SPEED = 11,
+	SLOWDOWN_DURATION = 0.3,
+	ACTION_LOCK_DURATION = 1.5,
+	CHARGE_DURATION = 0.1
+}
+
+local UnionMesh = replicatedStorage.Meshes.Characters["Ichigo (Hollow Mask)"].Combat.zangetsu:Clone()
+local GetsugaAnimation = replicatedFirst.Preloader.Animations.Characters["Ichigo (Hollow Mask)"].GetsugaSlash.Getsuga
+
+local equippedUnions = {}
+
+-- Utility function to apply stun
+local function applyStun(enemyChar, enemyHumanoid, duration)
+	if not enemyChar or not enemyHumanoid or enemyHumanoid.Health <= 0 then return end
+
+	enemyChar:SetAttribute("Stunned", true)
+
+	local originalWalk = enemyHumanoid.WalkSpeed
+	local originalJump = enemyHumanoid.JumpHeight
+
+	MovementController:Lock(enemyHumanoid, "GetsugaStun")
+
+	task.delay(duration, function()
+		if enemyHumanoid and enemyHumanoid.Parent and enemyHumanoid.Health > 0 then
+			if enemyChar then
+				enemyChar:SetAttribute("Stunned", false)
+				MovementController:Unlock(enemyHumanoid, "GetsugaStun")
+			end
+		end
+	end)
+
+end
+
+-- Function to play charge VFX
+local function playChargeVFX(rootPart, chargeTemplate)
+	if not chargeTemplate or not rootPart then return end
+
+	local chargeClone = chargeTemplate:Clone()
+	chargeClone.Parent = rootPart
+
+	-- Emit all particle emitters
+	for _, v in pairs(chargeClone:GetDescendants()) do
+		if v:IsA("ParticleEmitter") then
+			local emitCount = v:GetAttribute("EmitCount")
+			if emitCount then
+				v:Emit(emitCount)
+			end
+		end
+	end
+
+	-- Clean up after particles finish
+	debrisService:AddItem(chargeClone, 3)
+end
+
+-- Function to play TP VFX
+local function playTPVFX(rootPart)
+	if not TP then return end
+
+	-- Clone all attachments from TP
+	local tpAttachments = {}
+	for _, child in pairs(TP:GetChildren()) do
+		if child:IsA("Attachment") then
+			local attachClone = child:Clone()
+			attachClone.Parent = rootPart
+			table.insert(tpAttachments, attachClone)
+
+			-- Emit all particle emitters
+			for _, descendant in pairs(attachClone:GetDescendants()) do
+				if descendant:IsA("ParticleEmitter") then
+					local emitCount = descendant:GetAttribute("EmitCount")
+					if emitCount then
+						descendant:Emit(emitCount)
+					end
+				end
+			end
+		end
+	end
+
+	-- Clean up attachments after particles finish
+	task.delay(5, function()
+		for _, attach in pairs(tpAttachments) do
+			if attach and attach.Parent then
+				attach:Destroy()
+			end
+		end
+	end)
+end
+
+-- Function to disable all effects under projectile
+local function disableProjectileEffects(projectile)
+	for _, v in pairs(projectile:GetDescendants()) do
+		if v:IsA("ParticleEmitter") or v:IsA("Light") or v:IsA("Beam") then
+			v.Enabled = false
+		end
+	end
+end
+
+-- Create projectile function
+local function createProjectile(rootPart, playerCharacter, player, damage, isSecondSlash)
+	local projectileTemplate = replicatedStorage.VFX.Characters["Ichigo (Hollowfication)"].GetsugaSlash.Gugus
+	if not projectileTemplate then return end
+
+	local projectile = projectileTemplate:Clone()
+	projectile.CanCollide = false
+	projectile.Anchored = false
+
+	local heightOffset = CFrame.new(0, 3, 0)
+	local turnAround = CFrame.Angles(0, math.rad(180), 0)
+
+	if isSecondSlash then
+		projectile.CFrame = rootPart.CFrame * heightOffset * turnAround * CFrame.Angles(0, 0, math.rad(90))
+	else
+		projectile.CFrame = rootPart.CFrame * heightOffset * turnAround
+	end
+
+	projectile.Parent = workspace
+
+	-- Enable particle effects
+	for _, v in pairs(projectile:GetDescendants()) do
+		if v:IsA("ParticleEmitter") or v:IsA("Light") or v:IsA("Beam") then
+			v.Enabled = true
+		end
+	end
+
+	local bodyVelocity = Instance.new("BodyVelocity")
+	bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	bodyVelocity.Velocity = rootPart.CFrame.LookVector * CONFIG.PROJECTILE_SPEED
+	bodyVelocity.Parent = projectile
+
+	local hasHit = false
+	local projectileConnection
+
+	projectileConnection = projectile.Touched:Connect(function(hit)
+		if hasHit then return end
+
+		local enemyChar = hit.Parent
+		if not enemyChar or enemyChar == playerCharacter then return end
+
+		local enemyHumanoid = enemyChar:FindFirstChildOfClass("Humanoid")
+		local enemyRoot = enemyChar:FindFirstChild("HumanoidRootPart")
+
+		if not enemyHumanoid or not enemyRoot or enemyHumanoid.Health <= 0 then return end
+
+		local iFrames = enemyChar:FindFirstChild("IFrames")
+		if iFrames and iFrames.Value == true then
+			return
+		end
+		-- Mark as hit to prevent multiple hits
+		hasHit = true
+
+		-- Disable all projectile effects on hit
+		disableProjectileEffects(projectile)
+
+		-- Apply damage
+		enemyHumanoid:TakeDamage(damage)
+
+		-- Disable ragdoll
+		local targetRagdollValue = enemyChar:FindFirstChild("IsRagdoll")
+		if targetRagdollValue then
+			targetRagdollValue.Value = false
+		end
+
+		-- Spawn hit VFX
+		local hitVFX = getsugaHITVFX:Clone()
+		hitVFX.Parent = enemyRoot
+		-- Emit particles
+		for _, v in pairs(hitVFX:GetDescendants()) do
+			if v:IsA("ParticleEmitter") then
+				v:Emit(v:GetAttribute("EmitCount"))
+			end
+		end
+
+		-- Clean up VFX
+		debrisService:AddItem(hitVFX, 5)  -- or whatever duration you prefer
+
+		-- Handle second slash specifics
+		if isSecondSlash then
+			-- Fire client event
+			GetsugaSlashCS:FireClient(player, enemyChar)
+
+			-- Teleport player to enemy
+			local playerRoot = playerCharacter:FindFirstChild("HumanoidRootPart")
+			if playerRoot then
+				local tpPosition = enemyRoot.CFrame * CFrame.new(0, 0, 4)
+				playerRoot.CFrame = CFrame.new(tpPosition.Position, enemyRoot.Position)
+
+				-- Play TP VFX
+				playTPVFX(playerRoot)
+			end
+
+			-- Free enemy from stun BEFORE applying new stun
+			enemyChar:SetAttribute("Stunned", false)
+
+			-- Apply 1.5 second stun
+			applyStun(enemyChar, enemyHumanoid, CONFIG.SECOND_SLASH_STUN)
+		end
+		-- First slash has NO stun
+	end)
+
+	-- Clean up projectile after lifetime
+	debrisService:AddItem(projectile, CONFIG.PROJECTILE_LIFETIME)
+end
+
+-- Handle sword equipment/unequipment based on if the user is holding the tool.
+local equipRemote = replicatedStorage.Remotes.Characters["Ichigo (Hollow Mask)"].GetsugaSlash.equip
+
+equipRemote.OnServerEvent:Connect(function(player, action)
+	local character = player.Character
+	if not character then return end
+
+	if action == "equipped" then
+		local rightHand = character:FindFirstChild("Right Arm")
+		if rightHand and UnionMesh then
+			local unionClone = UnionMesh:Clone()
+			unionClone.CanCollide = false
+			unionClone.Parent = character
+
+			local weld = Instance.new("Weld")
+			weld.Part0 = rightHand
+			weld.Part1 = unionClone
+			weld.C0 = CFrame.new(0, -1.35, -2) * CFrame.Angles(0, math.rad(180), 0)
+			weld.Parent = unionClone
+
+			equippedUnions[player] = unionClone
+		end
+
+	elseif action == "unequipped" then
+		if equippedUnions[player] then
+			equippedUnions[player]:Destroy()
+			equippedUnions[player] = nil
+		end
+	end
+end)
+
+-- Clean up on player leave
+game.Players.PlayerRemoving:Connect(function(player)
+	if equippedUnions[player] then
+		equippedUnions[player]:Destroy()
+		equippedUnions[player] = nil
+	end
+end)
+
+-- Main ability handler
+GetsugaSlash.OnServerEvent:Connect(function(player)
+	local character = player.Character
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not rootPart then return end
+
+	local IFrames = character.IFrames
+
+	-- Check for locks
+	if character:GetAttribute("Stunned") or character:GetAttribute("ActionLock") then
+		return
+	end
+
+	-- Create action lock token
+	local token = tick()
+	character:SetAttribute("ActionLockToken", token)
+
+	-- Set action lock
+	character:SetAttribute("ActionLock", true)
+
+	-- Load and play animation
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = humanoid
+	end
+
+	local animTrack = animator:LoadAnimation(GetsugaAnimation)
+	animTrack:Play()
+
+	-- Play sound effect
+	local sfx = Instance.new("Sound")
+	sfx.SoundId = "rbxassetid://115687047444555"
+	sfx.Parent = rootPart
+	sfx:Play()
+	debrisService:AddItem(sfx, 3)
+
+	local originalWalkSpeed = humanoid.WalkSpeed
+
+	-- First slash with vertical charge
+	humanoid.WalkSpeed = CONFIG.SLOWDOWN_SPEED
+
+	-- Play vertical charge VFX
+	playChargeVFX(rootPart, verticalCharge)
+
+	-- Wait for charge duration before firing projectile
+	task.delay(CONFIG.CHARGE_DURATION, function()
+		if not character or not character.Parent or not rootPart or not rootPart.Parent then return end
+		createProjectile(rootPart, character, player, CONFIG.FIRST_SLASH_DAMAGE, false)
+	end)
+
+	task.delay(CONFIG.SLOWDOWN_DURATION, function()
+		if humanoid and humanoid.Parent then
+			humanoid.WalkSpeed = originalWalkSpeed
+		end
+	end)
+
+	-- Second slash with horizontal charge
+	task.delay(CONFIG.SLASH_DELAY, function()
+		if not character or not character.Parent or not rootPart or not rootPart.Parent then return end
+
+		humanoid.WalkSpeed = CONFIG.SLOWDOWN_SPEED
+
+		-- Play horizontal charge VFX
+		playChargeVFX(rootPart, horizontalCharge)
+
+		-- Wait for charge duration before firing projectile
+		task.delay(CONFIG.CHARGE_DURATION, function()
+			if not character or not character.Parent or not rootPart or not rootPart.Parent then return end
+			createProjectile(rootPart, character, player, CONFIG.SECOND_SLASH_DAMAGE, true)
+		end)
+
+		task.delay(CONFIG.SLOWDOWN_DURATION, function()
+			if humanoid and humanoid.Parent then
+				humanoid.WalkSpeed = originalWalkSpeed
+			end
+		end)
+	end)
+
+	-- Clean up
+	task.delay(CONFIG.ACTION_LOCK_DURATION, function()
+		if character and character.Parent then
+			-- Use token-based unlock
+			if character:GetAttribute("ActionLockToken") == token then
+				character:SetAttribute("ActionLock", false)
+			end
+		end
+
+		if animTrack then
+			animTrack:Stop()
+		end
+	end)
+end)
