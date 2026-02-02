@@ -47,3 +47,5 @@ end)
 GetsugaSlashCS.OnClientEvent:Connect(function()
 	camShake:Shake(CameraShaker.Presets.Explosion)
 end)
+
+--
